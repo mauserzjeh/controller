@@ -71,48 +71,45 @@ type (
 // Controller -------------------------------------------------------
 // ------------------------------------------------------------------
 
-// New creates a new controller instance
-func New(workerCount uint) *controller {
+// New creates a new controller instance with a set amount of workers
+func New(workers uint) *controller {
 	c := controller{
 		requests:  make(chan task),
-		workers:   make([]*worker, workerCount),
 		isRunning: false,
 	}
 
-	// initialize workers
-	for i := uint(0); i < workerCount; i++ {
-		c.workers[i] = newWorker(c.requests)
-	}
+	// Initialize workers
+	c.SetWorkers(workers)
 
 	return &c
 }
 
-// GetWorkersSize returns the amount of workers the controller controlls
-func (c *controller) GetWorkerSize() int {
+// GetWorkers returns the amount of workers the controller controlls
+func (c *controller) GetWorkers() int {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
 	return len(c.workers)
 }
 
-// SetWorkerSize sets the amount of workers the controller controlls.
+// SetWorkers sets the amount of workers the controller controlls.
 // If the size is reduced, then the stopped workers will be removed from the pool.
 // If a worker is stopped in the middle of a process, then the goroutine will block
-// until the process is finished.
+// until the process is finished. Otherwise it will stop immediately
 // If the size is increased, then new workers will be added to the pool. If the controller
 // is already running, then the newly added workers will be started automatically.
-func (c *controller) SetWorkerSize(size uint) {
+func (c *controller) SetWorkers(workers uint) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
 	lw := uint(len(c.workers))
 
-	if lw == size {
+	if lw == workers {
 		return
 	}
 
 	// If the size was increased, then add new workers
-	for i := lw; lw < size; i++ {
+	for i := lw; i < workers; i++ {
 		c.workers = append(c.workers, newWorker(c.requests))
 
 		// If the controller is already running, then run the workers too
@@ -123,17 +120,18 @@ func (c *controller) SetWorkerSize(size uint) {
 
 	// If the size was decreased, then stop the workers that will be deleted.
 	// Stopping happens asynchronously
-	for i := size; size < lw; i++ {
+	for i := workers; i < lw; i++ {
 		c.workers[i].stop()
 	}
 
-	// wait for all stopped workers to finish
-	for i := size; size < lw; i++ {
+	// Wait for all stopped workers to finish
+	for i := workers; i < lw; i++ {
 		c.workers[i].stopped()
 		c.workers[i] = nil
 	}
 
-	c.workers = c.workers[:size]
+	// Remove unused workers from the pool
+	c.workers = c.workers[:workers]
 }
 
 // AddRequest adds a new request to the queue
