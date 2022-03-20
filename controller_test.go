@@ -38,21 +38,19 @@ func TestNewController(t *testing.T) {
 }
 
 func TestGetWorkers(t *testing.T) {
-	c1 := New(0)
-
-	want := 0
+	want := uint(0)
+	c1 := New(want)
 	got := c1.GetWorkers()
 
-	if want != got {
+	if int(want) != got {
 		t.Errorf("Wrong amount of workers: %v != %v", want, got)
 	}
 
-	c2 := New(10)
-
 	want = 10
+	c2 := New(want)
 	got = c2.GetWorkers()
 
-	if want != got {
+	if int(want) != got {
 		t.Errorf("Wrong amount of workers: %v != %v", want, got)
 	}
 }
