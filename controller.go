@@ -229,6 +229,8 @@ func (c *controller) Stop() {
 	// Stop the controller, but the workers
 	// will keep processing the queued requests
 	c.isRunning = false
+
+	// TODO stop workers after they processed all tasks
 }
 
 // Kill stops the controller from receiving new requests.
