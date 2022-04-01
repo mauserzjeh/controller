@@ -25,63 +25,115 @@ package controller
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
+const (
+	stateRunning = iota
+	stateShutDown
+	stateStopped
+	stateTerminated
+)
+
 var (
-	ErrReqTimedOut      = errors.New("request timed out")
-	ErrReqInterrupted   = errors.New("request interrupted")
-	ErrControlleStopped = errors.New("controller stopped")
+	ErrReqTimedOut            = errors.New("request timed out")
+	ErrReqInterrupted         = errors.New("request interrupted")
+	ErrControllerStopped      = errors.New("controller stopped")
+	ErrControllerShuttingDown = errors.New("controller is shutting down")
+	ErrControllerTerminated   = errors.New("controller terminated")
+	ErrControllerIsNotStopped = errors.New("controller is not stopped")
+	ErrControllerIsNotRunning = errors.New("controller is not running")
 )
 
 type (
+
+	// Request struct that can be sent to the controller
 	Request struct {
-		Callback func() Result
-		Timeout  time.Duration
+		TaskFunc func() Result // A function to do
+		Timeout  time.Duration // Optional timeout
 	}
 
+	// Result struct will hold the result of a request
 	Result struct {
-		Output any
-		Err    error
+		Output any   // Output of the task function
+		Err    error // Error of the task function
 	}
+
+	// controller struct represents the controller
 	controller struct {
-		requests  chan task
-		workers   []*worker
-		isRunning bool
-		mux       sync.Mutex
+		pool        chan chan task // Pool for workers
+		queue       chan task      // Queue for queued tasks
+		queuedTasks int32          // Counter for queued tasks
+		workers     []*worker      // Workers that the controller holds
+		state       int32          // State of the controller
+		cQuit       chan struct{}  // Quit signal channel
+		cExited     chan struct{}  // Exited signal channel
+		mux         sync.Mutex     // Mutex for locking
 	}
 
+	// worker struct represents a single worker
 	worker struct {
-		tasks     <-chan task
-		stopC     chan struct{}
-		killC     chan struct{}
-		stoppedC  chan struct{}
-		isRunning bool
-		mux       sync.Mutex
+		pool       chan<- chan task // Pool where the worker registers itself
+		w          chan task        // The request channel of the worker where it will receive a task after registration
+		cStop      chan struct{}    // Stop signal channel
+		cTerminate chan struct{}    // Terminate signal channel
+		cExited    chan struct{}    // Exited signal channel
 	}
 
+	// task struct represents a task
 	task struct {
-		callback func() Result
-		timeout  time.Duration
-		result   chan Result
+		taskFunc func() Result // A function to do
+		result   chan Result   // Result channel where the result will be sent back
 	}
 )
 
 // ------------------------------------------------------------------
-// Controller -------------------------------------------------------
+// Controller
 // ------------------------------------------------------------------
 
 // New creates a new controller instance with a set amount of workers
-func New(workers uint) *controller {
+func New(workers int) *controller {
 	c := controller{
-		requests:  make(chan task),
-		isRunning: false,
+		pool:  make(chan chan task),
+		queue: make(chan task),
+		state: stateStopped,
 	}
 
 	// Initialize workers
 	c.SetWorkers(workers)
 
+	go c.loop()
 	return &c
+}
+
+// loop runs a controller loop
+func (c *controller) loop() {
+
+	// Avoid starting multiple loops
+	if atomic.LoadInt32(&c.state) != stateStopped {
+		return
+	}
+
+	defer func() {
+		close(c.cExited)
+	}()
+
+	// Loop through the tasks
+	for t := range c.queue {
+		select {
+
+		// Select a worker from the pool
+		case w := <-c.pool:
+			// Assign task to worker
+			w <- t
+			atomic.AddInt32(&c.queuedTasks, -1)
+
+		// Received quit signal
+		case <-c.cQuit:
+			return
+		}
+	}
 }
 
 // GetWorkers returns the amount of workers the controller controlls
@@ -96,26 +148,25 @@ func (c *controller) GetWorkers() int {
 // If the size is reduced, then the stopped workers will be removed from the pool.
 // If a worker is stopped in the middle of a process, then the goroutine will block
 // until the process is finished. Otherwise it will stop immediately
-// If the size is increased, then new workers will be added to the pool. If the controller
-// is already running, then the newly added workers will be started automatically.
-func (c *controller) SetWorkers(workers uint) {
+// If the size is increased, then new workers will be added to the pool.
+func (c *controller) SetWorkers(workers int) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
-	lw := uint(len(c.workers))
-
+	// Don't do anything if the size  wasn't changed
+	lw := len(c.workers)
 	if lw == workers {
 		return
 	}
 
+	// There must be at least 1 worker in the pool
+	if workers <= 0 {
+		workers = 1
+	}
+
 	// If the size was increased, then add new workers
 	for i := lw; i < workers; i++ {
-		c.workers = append(c.workers, newWorker(c.requests))
-
-		// If the controller is already running, then run the workers too
-		if c.isRunning {
-			go c.workers[i].start()
-		}
+		c.workers = append(c.workers, newWorker(c.pool))
 	}
 
 	// If the size was decreased, then stop the workers that will be deleted.
@@ -126,7 +177,7 @@ func (c *controller) SetWorkers(workers uint) {
 
 	// Wait for all stopped workers to finish
 	for i := workers; i < lw; i++ {
-		c.workers[i].stopped()
+		c.workers[i].exited()
 		c.workers[i] = nil
 	}
 
@@ -134,259 +185,272 @@ func (c *controller) SetWorkers(workers uint) {
 	c.workers = c.workers[:workers]
 }
 
+func (c *controller) stopWorkers(terminate bool) {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+
+	lw := len(c.workers)
+
+	if terminate {
+		// terminate workers
+		for i := 0; i < lw; i++ {
+			c.workers[i].terminate()
+		}
+
+	} else {
+		// stop workers
+		for i := 0; i < lw; i++ {
+			c.workers[i].stop()
+		}
+	}
+
+	for i := 0; i < lw; i++ {
+		c.workers[i].exited()
+		c.workers[i] = nil
+	}
+}
+
+// QueuedTasks returns the amount of tasks in the queue
+func (c *controller) QueuedTasks() int32 {
+	return atomic.LoadInt32(&c.queuedTasks)
+}
+
+// IsRunning returns the state of the controller
+func (c *controller) IsRunning() bool {
+	return atomic.LoadInt32(&c.state) == stateRunning
+}
+
+// IsTerminated returns if the controller was terminated and cannot be restarted anymore
+func (c *controller) IsTerminated() bool {
+	return atomic.LoadInt32(&c.state) == stateTerminated
+}
+
+// IsShuttingDown returns if the controller is shutting down
+func (c *controller) IsShuttingDown() bool {
+	return atomic.LoadInt32(&c.state) == stateShutDown
+}
+
+// IsStopped returns if the controller is stopped
+func (c *controller) IsStopped() bool {
+	return atomic.LoadInt32(&c.state) == stateStopped
+}
+
+// Stop stops the controller and the processing of the queue
+// All tasks that have been in progress will be finished. The function blocks until
+// the controller is not stopped completely.
+func (c *controller) Stop(purgeQueue bool) error {
+	if !atomic.CompareAndSwapInt32(&c.state, stateRunning, stateShutDown) {
+		return ErrControllerIsNotRunning
+	}
+
+	close(c.cQuit)
+	c.stopWorkers(false)
+
+	<-c.cExited
+
+	// Purge the queue by reseting the channel
+	if purgeQueue {
+		close(c.queue)
+		c.queue = make(chan task)
+	}
+
+	atomic.SwapInt32(&c.state, stateStopped)
+	return nil
+}
+
+// Terminate terminates the controller. All tasks that have been in progress will be terminated.
+// The function blocks until the controller is not terminated completely. The controller
+// will not be able to restarted after this function is called.
+func (c *controller) Terminate() error {
+	if !atomic.CompareAndSwapInt32(&c.state, stateRunning, stateShutDown) {
+		return ErrControllerIsNotRunning
+	}
+
+	close(c.cQuit)
+	c.stopWorkers(true)
+
+	<-c.cExited
+
+	// Purge the queue
+	close(c.queue)
+	c.queue = nil
+
+	atomic.SwapInt32(&c.state, stateTerminated)
+	return nil
+}
+
+// Restart tries to restart the controller. If the queue was not purged when the controller
+// was stopped, then the queued tasks will be processed as well.
+func (c *controller) Restart() error {
+	if atomic.LoadInt32(&c.state) == stateTerminated {
+		return ErrControllerTerminated
+	}
+
+	if !atomic.CompareAndSwapInt32(&c.state, stateStopped, stateRunning) {
+		return ErrControllerIsNotStopped
+	}
+
+	c.cQuit = make(chan struct{})
+	c.cExited = make(chan struct{})
+
+	c.mux.Lock()
+	for i := 0; i < len(c.workers); i++ {
+		c.workers[i] = newWorker(c.pool)
+	}
+	c.mux.Unlock()
+
+	go c.loop()
+	return nil
+}
+
 // AddRequest adds a new request to the queue
 // and returns the result when it is processed.
 // The function blocks until the result is returned
-func (c *controller) AddRequest(req Request) Result {
-
-	t := task{
-		callback: req.Callback,
-		timeout:  req.Timeout,
-		result:   make(chan Result, 1),
-	}
-
-	return c.addTask(t)
+func (c *controller) AddRequest(r Request) Result {
+	return c.addTask(r)
 }
 
 // AddAsyncRequest adds a new request to the queue and returns
 // a channel on which the result can be received.
 // The function does not block.
-func (c *controller) AddAsyncRequest(req Request) chan Result {
+func (c *controller) AddAsyncRequest(r Request) chan Result {
 	res := make(chan Result, 1)
 
 	go func() {
-		t := task{
-			callback: req.Callback,
-			timeout:  req.Timeout,
-			result:   make(chan Result, 1),
-		}
-
-		res <- c.addTask(t)
+		res <- c.addTask(r)
 		close(res)
 	}()
 
 	return res
 }
 
-// addTask adds a new task to the request queue and returns the result
-func (c *controller) addTask(t task) Result {
-
-	// If the controller is not running return with an error
-	if !c.isRunning {
+// addTask adds a new task to the queue and returns the result
+func (c *controller) addTask(r Request) Result {
+	if !c.IsRunning() {
 		return Result{
 			Output: nil,
-			Err:    ErrControlleStopped,
+			Err:    ErrControllerIsNotRunning,
 		}
 	}
 
-	// Queue the task
-	c.requests <- t
+	t := task{
+		taskFunc: r.taskFuncTimeoutWrapper(),
+		result:   make(chan Result, 1),
+	}
 
-	var r Result
+	select {
 
-	// If timeout was set then process with timeout
-	if t.timeout > 0 {
-		timeout := time.NewTimer(t.timeout)
+	// If a worker is available then give the task to the worker
+	case w := <-c.pool:
+		w <- t
+
+	// Otherwise put the task to the queue
+	case c.queue <- t:
+		atomic.AddInt32(&c.queuedTasks, 1)
+	}
+
+	// Return the result
+	return <-t.result
+}
+
+// taskFuncTimeoutWrapper
+func (r *Request) taskFuncTimeoutWrapper() func() Result {
+	if r.Timeout <= 0 {
+		return r.TaskFunc
+	}
+
+	return func() Result {
+		res := make(chan Result, 1)
+
+		timeout := time.NewTimer(r.Timeout)
 		select {
-		case r = <-t.result:
+		case res <- r.TaskFunc():
+			timeout.Stop()
+			return <-res
+
 		case <-timeout.C:
-			r = Result{
+			return Result{
 				Output: nil,
 				Err:    ErrReqTimedOut,
 			}
 		}
-
-		timeout.Stop()
-		return r
 	}
-
-	// Otherwise return when ready
-	return <-t.result
-}
-
-// QueuedRequests returns the amount of requests queued
-func (c *controller) QueuedRequests() int {
-	c.mux.Lock()
-	defer c.mux.Unlock()
-
-	return len(c.requests)
-}
-
-// IsRunning returns the state of the controller
-func (c *controller) IsRunning() bool {
-	c.mux.Lock()
-	defer c.mux.Unlock()
-
-	return c.isRunning
-}
-
-// Stop stops the controller from receiving new requests.
-// The processing of queued requests continues
-func (c *controller) Stop() {
-	c.mux.Lock()
-	defer c.mux.Unlock()
-
-	// Stop the controller, but the workers
-	// will keep processing the queued requests
-	c.isRunning = false
-
-	// TODO stop workers after they processed all tasks
-}
-
-// Kill stops the controller from receiving new requests.
-// The queued requests are thrown away
-func (c *controller) Kill() {
-	c.mux.Lock()
-	defer c.mux.Unlock()
-
-	// Stop the controller from receiving new requests
-	c.isRunning = false
-
-	// Stop workers, all tasks in progress will be interrupted
-	// and an error will be returned
-	for i := 0; i < len(c.workers); i++ {
-		c.workers[i].kill()
-	}
-
-	// Drain channel so if the controller is restarted
-	// then old data will not be processed
-	for len(c.requests) > 0 {
-		<-c.requests
-	}
-
-}
-
-// Start starts the workers of the controller and lets the controller
-// receive new requests
-func (c *controller) Start() {
-	c.mux.Lock()
-	defer c.mux.Unlock()
-
-	// Avoid starting if the controller is already running
-	if c.isRunning {
-		return
-	}
-
-	// Start the workers
-	for i := 0; i < len(c.workers); i++ {
-		go c.workers[i].start()
-	}
-
-	c.isRunning = true
 }
 
 // ------------------------------------------------------------------
-// Worker -----------------------------------------------------------
+// Worker
 // ------------------------------------------------------------------
 
 // newWorker creates a new worker instance
-func newWorker(tasks <-chan task) *worker {
+func newWorker(pool chan<- chan task) *worker {
 	w := worker{
-		tasks:     tasks,
-		isRunning: false,
+		pool:       pool,
+		w:          make(chan task, 1),
+		cStop:      make(chan struct{}),
+		cTerminate: make(chan struct{}),
+		cExited:    make(chan struct{}),
 	}
 
+	go w.loop() // Start worker loop
 	return &w
 }
 
-// start starts a worker loop which processes the incoming tasks
-func (w *worker) start() {
-
-	// Lock mutex
-	w.mux.Lock()
-
-	// Check if the worker is already running.
-	// If it is running then unlock the mutex and return
-	if w.isRunning {
-		w.mux.Unlock()
-		return
-	}
-
-	w.stopC = make(chan struct{})    // Set stop signal channel
-	w.killC = make(chan struct{})    // Set kill signal channel
-	w.stoppedC = make(chan struct{}) // Set stopped signal channel
-	w.isRunning = true               // Set running to true
-
-	// Unlock mutex
-	w.mux.Unlock()
-
-	// Create a defer function that will set running state to false and
-	// also close the stopped signal channel
+// loop runs a worker loop
+func (w *worker) loop() {
 	defer func() {
-		w.mux.Lock()
-		defer w.mux.Unlock()
-
-		w.isRunning = false
-		close(w.stoppedC)
+		close(w.cExited)
 	}()
 
-	// Worker loop
 	for {
+
+		// Register worker in the pool
+		w.pool <- w.w
+
 		select {
-		case task := <-w.tasks:
-			// Receive a task if possible
+
+		// Receive a task
+		case task := <-w.w:
 
 			select {
-			case task.result <- task.callback():
-				// Process task, send back the result and
-				// close the result channel
+
+			// Do task and send back the result
+			case task.result <- task.taskFunc():
 				close(task.result)
 
-			case <-w.killC:
-				// If kill signal is received before the task callback
-				// finishes processing, then return with an error
+			// If the controller gets terminated interrupt the task
+			// and send back and error as result
+			case <-w.cTerminate:
 				task.result <- Result{
 					Output: nil,
 					Err:    ErrReqInterrupted,
 				}
 
-				// Close the result channel and quit from worker loop
 				close(task.result)
 				return
 			}
 
-		case <-w.stopC:
-			// Quit from worker loop
+		// Received stop signal
+		case <-w.cStop:
 			return
 
-		case <-w.killC:
-			// Quit from worker loop
+		// Received terminate signal
+		case <-w.cTerminate:
 			return
 		}
 	}
 }
 
-// stop stops the worker loop.
-// It will let a task finish if it is in process already
+// stop closes the stop channel signaling the worker to stop
 func (w *worker) stop() {
-	w.mux.Lock()
-	defer w.mux.Unlock()
-
-	if !w.isRunning {
-		return
-	}
-	close(w.stopC)
+	close(w.cStop)
 }
 
-// kill stops the worker loop.
-// It will interrupt a task if it is in process already
-func (w *worker) kill() {
-	w.mux.Lock()
-	defer w.mux.Unlock()
-
-	if !w.isRunning {
-		return
-	}
-	close(w.killC)
+// terminate closes the terminate channel signaling the worker to terminate
+func (w *worker) terminate() {
+	close(w.cTerminate)
 }
 
-// stopped blocks until the worker is stopped
-func (w *worker) stopped() {
-	w.mux.Lock()
-	defer w.mux.Unlock()
-
-	if !w.isRunning {
-		return
-	}
-	<-w.stoppedC
+// exited blocks until the worker has exited from its loop
+func (w *worker) exited() {
+	<-w.cExited
 }
