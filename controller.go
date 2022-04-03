@@ -66,6 +66,7 @@ type (
 		queue       chan task      // Queue for queued tasks
 		queuedTasks int32          // Counter for queued tasks
 		workers     []*worker      // Workers that the controller holds
+		freeWorkers int32          // The amount of workers in the pool
 		state       int32          // State of the controller
 		cQuit       chan struct{}  // Quit signal channel
 		cExited     chan struct{}  // Exited signal channel
@@ -95,15 +96,15 @@ type (
 // New creates a new controller instance with a set amount of workers
 func New(workers int) *controller {
 	c := controller{
-		pool:  make(chan chan task),
-		queue: make(chan task),
-		state: stateStopped,
+		pool:    make(chan chan task),
+		queue:   make(chan task),
+		state:   stateStopped,
+		cQuit:   make(chan struct{}),
+		cExited: make(chan struct{}),
 	}
 
-	// Initialize workers
-	c.SetWorkers(workers)
-
-	go c.loop()
+	c.SetWorkers(workers) // Initialize workers
+	c.loop()              // Start controller loop
 	return &c
 }
 
@@ -115,25 +116,36 @@ func (c *controller) loop() {
 		return
 	}
 
-	defer func() {
-		close(c.cExited)
-	}()
+	// Set state to running
+	atomic.StoreInt32(&c.state, stateRunning)
 
-	// Loop through the tasks
-	for t := range c.queue {
-		select {
+	go func() {
 
-		// Select a worker from the pool
-		case w := <-c.pool:
-			// Assign task to worker
-			w <- t
-			atomic.AddInt32(&c.queuedTasks, -1)
+		defer func() {
+			close(c.cExited)
+		}()
 
-		// Received quit signal
-		case <-c.cQuit:
-			return
+		for {
+			select {
+			case t := <-c.queue:
+				// Receive a task from the queue
+				select {
+				case w := <-c.pool:
+					// Get a worker from the pool and assign the task to the worker
+					w <- t
+					atomic.AddInt32(&c.queuedTasks, -1)
+
+				case <-c.cQuit:
+					// Receive quit signal
+					return
+				}
+
+			case <-c.cQuit:
+				// Receive quit signal
+				return
+			}
 		}
-	}
+	}()
 }
 
 // GetWorkers returns the amount of workers the controller controlls
@@ -210,11 +222,6 @@ func (c *controller) stopWorkers(terminate bool) {
 	}
 }
 
-// QueuedTasks returns the amount of tasks in the queue
-func (c *controller) QueuedTasks() int32 {
-	return atomic.LoadInt32(&c.queuedTasks)
-}
-
 // IsRunning returns the state of the controller
 func (c *controller) IsRunning() bool {
 	return atomic.LoadInt32(&c.state) == stateRunning
@@ -233,6 +240,11 @@ func (c *controller) IsShuttingDown() bool {
 // IsStopped returns if the controller is stopped
 func (c *controller) IsStopped() bool {
 	return atomic.LoadInt32(&c.state) == stateStopped
+}
+
+// QueuedTasks returns the amount of tasks in the queue
+func (c *controller) QueuedTasks() int32 {
+	return atomic.LoadInt32(&c.queuedTasks)
 }
 
 // Stop stops the controller and the processing of the queue
@@ -299,7 +311,7 @@ func (c *controller) Restart() error {
 	}
 	c.mux.Unlock()
 
-	go c.loop()
+	c.loop()
 	return nil
 }
 
@@ -402,39 +414,44 @@ func (w *worker) loop() {
 	}()
 
 	for {
-
-		// Register worker in the pool
-		w.pool <- w.w
-
 		select {
-
-		// Receive a task
-		case task := <-w.w:
+		case w.pool <- w.w:
+			// Register the worker to the pool
 
 			select {
+			case task := <-w.w:
+				// Worker received a task
+				select {
+				case task.result <- task.taskFunc():
+					// Process the task and send back the result
+					close(task.result)
 
-			// Do task and send back the result
-			case task.result <- task.taskFunc():
-				close(task.result)
+				case <-w.cTerminate:
+					// Worker got terminated while the task was still processing
+					task.result <- Result{
+						Output: nil,
+						Err:    ErrReqInterrupted,
+					}
 
-			// If the controller gets terminated interrupt the task
-			// and send back and error as result
-			case <-w.cTerminate:
-				task.result <- Result{
-					Output: nil,
-					Err:    ErrReqInterrupted,
+					close(task.result)
+					return
 				}
 
-				close(task.result)
+			case <-w.cStop:
+				// Receive stop signal
+				return
+
+			case <-w.cTerminate:
+				// Receive terminate signal
 				return
 			}
 
-		// Received stop signal
 		case <-w.cStop:
+			// Receive stop signal
 			return
 
-		// Received terminate signal
 		case <-w.cTerminate:
+			// Receive terminate signal
 			return
 		}
 	}
