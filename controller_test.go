@@ -129,10 +129,10 @@ func TestRestart(t *testing.T) {
 	assertEqual(t, err == nil, true)
 
 	err = c.Restart()
-	assertEqual(t, err == ErrControllerMustBeStoppedOrTerminated, true)
+	assertEqual(t, err == ErrControllerMustBeStopped, true)
 }
 
-func TestDoubleStop(t *testing.T) {
+func TestStop(t *testing.T) {
 	c := New(1)
 	err := c.Stop(true)
 	assertEqual(t, err == nil, true)
@@ -155,6 +155,21 @@ func TestAddRequest(t *testing.T) {
 	res, err := c.AddRequest(r)
 	assertEqual(t, err == nil, true)
 	assertEqual(t, res.(int64), 2)
+}
+
+func TestAddRequestStopped(t *testing.T) {
+	c := New(1)
+	c.Stop(true)
+
+	r := Request{
+		TaskFunc: func() (any, error) {
+			return taskfn(1, 0, false)
+		},
+	}
+
+	res, err := c.AddRequest(r)
+	assertEqual(t, err == ErrControllerIsNotRunning, true)
+	assertEqual(t, res == nil, true)
 }
 
 func TestAddRequestTimeout(t *testing.T) {
@@ -278,8 +293,42 @@ func TestStopLongRunningTasks(t *testing.T) {
 
 		c.Stop(true)
 		r := <-res
-		// log.Printf("%+v", r)
 		assertEqual(t, r.Err == ErrReqInterrupted, true)
 		assertEqual(t, r.Output == nil, true)
 	})
+}
+
+func TestQueuedTasks(t *testing.T) {
+	c := New(1)
+
+	req := Request{
+		TaskFunc: func() (any, error) {
+			return taskfn(1, 1000, false)
+		},
+	}
+
+	for i := 0; i < 5; i++ {
+		c.AddAsyncRequest(req)
+	}
+
+	assertNotEqual(t, c.QueuedTasks(), 0)
+	c.Stop(true)
+}
+
+func TestIsShuttingDown(t *testing.T) {
+	c := New(1)
+	req := Request{
+		TaskFunc: func() (any, error) {
+			return taskfn(1, 2000, false)
+		},
+	}
+
+	res := c.AddAsyncRequest(req)
+	time.Sleep(500 * time.Millisecond)
+	go c.Stop(false)
+	time.Sleep(500 * time.Millisecond)
+	assertEqual(t, c.IsShuttingDown(), true)
+	r := <-res
+	assertEqual(t, r.Err == nil, true)
+	assertEqual(t, r.Output.(int64), 2)
 }

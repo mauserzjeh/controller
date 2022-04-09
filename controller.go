@@ -24,7 +24,6 @@ package controller
 
 import (
 	"errors"
-	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,11 +36,10 @@ const (
 )
 
 var (
-	ErrReqTimedOut    = errors.New("request timed out")
-	ErrReqInterrupted = errors.New("request interrupted")
-
-	ErrControllerIsNotRunning              = errors.New("controller is not running")
-	ErrControllerMustBeStoppedOrTerminated = errors.New("controller must be stopped or terminated to restart")
+	ErrReqTimedOut             = errors.New("request timed out")
+	ErrReqInterrupted          = errors.New("request interrupted")
+	ErrControllerIsNotRunning  = errors.New("controller is not running")
+	ErrControllerMustBeStopped = errors.New("controller must be stopped to restart")
 )
 
 type (
@@ -116,33 +114,25 @@ func (c *controller) loop() {
 	}
 
 	go func() {
-
 		defer func() {
 			close(c.cExited)
 		}()
 
 		for {
 			select {
-			case t := <-c.queue:
+			case t := <-c.queue: // Receive task from the queue
 
 				select {
-				case w := <-c.pool:
+				case w := <-c.pool: // Get a worker from the pool
+					w <- t // Give the task to the worker
 
-					w <- t
-					atomic.AddInt32(&c.queuedTasks, -1)
-
-				case <-c.cTerminate:
-					log.Println("c.cTerminate 1")
-
+				case <-c.cTerminate: // Receive terminate signal
 					return
 				}
 
-			case <-c.cStop:
-				log.Println("c.cStop 1")
+			case <-c.cTerminate: // Receive terminate signal
 				return
-
-			case <-c.cTerminate:
-				log.Println("c.cTerminate 2")
+			case <-c.cStop: // Receive stop signal
 				return
 
 			}
@@ -202,6 +192,9 @@ func (c *controller) SetWorkers(workers int) {
 	c.workers = c.workers[:workers]
 }
 
+// stopWorkers stops the workers of the controller. If the terminate parameter
+// is set to true then the worker will cancel its current task and return an error. If
+// the terminate parameter is set to false, then the worker will finish the task then stop.
 func (c *controller) stopWorkers(terminate bool) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
@@ -247,7 +240,10 @@ func (c *controller) QueuedTasks() int32 {
 	return atomic.LoadInt32(&c.queuedTasks)
 }
 
-// Stop TODO
+// Stop stops the controller and its workers. If the terminate parameter is set to true
+// then all tasks will be interrupted and will return an error. If the terminate parameter is
+// set to false, then the controller will wait for all tasks to be finished. The function blocks
+// the current goroutine
 func (c *controller) Stop(terminate bool) error {
 	if !atomic.CompareAndSwapInt32(&c.state, stateRunning, stateShutDown) {
 		return ErrControllerIsNotRunning
@@ -255,6 +251,9 @@ func (c *controller) Stop(terminate bool) error {
 
 	if terminate {
 		close(c.cTerminate)
+		close(c.queue)
+		c.queue = make(chan task)
+		atomic.StoreInt32(&c.queuedTasks, 0)
 	} else {
 		close(c.cStop)
 	}
@@ -262,22 +261,16 @@ func (c *controller) Stop(terminate bool) error {
 	<-c.cExited
 	c.stopWorkers(terminate)
 
-	if terminate {
-		// Purge the queue
-		close(c.queue)
-		c.queue = make(chan task)
-		atomic.StoreInt32(&c.queuedTasks, 0)
-	}
-
 	atomic.StoreInt32(&c.state, stateStopped)
 	return nil
 }
 
-// Restart TODO
+// Restart restarts the controller and its workers.
+// The controller can only be restarted when it's fully stopped.
 func (c *controller) Restart() error {
 	s := atomic.LoadInt32(&c.state)
 	if s == stateRunning || s == stateShutDown {
-		return ErrControllerMustBeStoppedOrTerminated
+		return ErrControllerMustBeStopped
 	}
 
 	c.cStop = make(chan struct{})
@@ -298,7 +291,9 @@ func (c *controller) Restart() error {
 // and returns the result when it is processed.
 // The function blocks until the result is returned
 func (c *controller) AddRequest(r Request) (any, error) {
+	atomic.AddInt32(&c.queuedTasks, 1)
 	res := c.addTask(r)
+	atomic.AddInt32(&c.queuedTasks, -1)
 	return res.Output, res.Err
 }
 
@@ -306,10 +301,12 @@ func (c *controller) AddRequest(r Request) (any, error) {
 // a channel on which the result can be received.
 // The function does not block.
 func (c *controller) AddAsyncRequest(r Request) chan result {
+	atomic.AddInt32(&c.queuedTasks, 1)
 	res := make(chan result, 1)
 
 	go func() {
 		res <- c.addTask(r)
+		atomic.AddInt32(&c.queuedTasks, -1)
 		close(res)
 	}()
 
@@ -318,6 +315,8 @@ func (c *controller) AddAsyncRequest(r Request) chan result {
 
 // addTask adds a new task to the queue and returns the result
 func (c *controller) addTask(r Request) (res result) {
+
+	// Handle if there is panic, due to trying to send on closed channel
 	defer func() {
 		if r := recover(); r != nil {
 			res = result{
@@ -327,6 +326,7 @@ func (c *controller) addTask(r Request) (res result) {
 		}
 	}()
 
+	// Check if the controller is running
 	if !c.IsRunning() {
 		return result{
 			Output: nil,
@@ -334,20 +334,19 @@ func (c *controller) addTask(r Request) (res result) {
 		}
 	}
 
+	// Create task
 	t := task{
 		taskFunc: r.taskFuncTimeoutWrapper(),
 		result:   make(chan result, 1),
 	}
 
-	c.queue <- t
-	atomic.AddInt32(&c.queuedTasks, 1)
+	c.queue <- t // Send task to the queue
 
 	select {
-	case res = <-t.result:
+	case res = <-t.result: // Wait for result and return it
 		return res
 
-	case <-c.cTerminate:
-		log.Println("addTask.cTerminate")
+	case <-c.cTerminate: // Received terminate signal, return error
 		return result{
 			Output: nil,
 			Err:    ErrReqInterrupted,
@@ -356,8 +355,9 @@ func (c *controller) addTask(r Request) (res result) {
 
 }
 
-// taskFuncTimeoutWrapper TODO
+// taskFuncTimeoutWrapper wraps the function in a timeout function if timeout is set.
 func (r *Request) taskFuncTimeoutWrapper() func() result {
+	// Create default function
 	f := func() result {
 		output, err := r.TaskFunc()
 		return result{
@@ -366,10 +366,12 @@ func (r *Request) taskFuncTimeoutWrapper() func() result {
 		}
 	}
 
+	// If timeout was not set return the default function
 	if r.Timeout <= 0 {
 		return f
 	}
 
+	// Return timeout function
 	return func() result {
 		res := make(chan result, 1)
 
@@ -419,11 +421,10 @@ func (w *worker) loop() {
 
 	for {
 		select {
-		case w.pool <- w.w:
-			// Register the worker to the pool
+		case w.pool <- w.w: // Register worker to the pool
 
 			select {
-			case task := <-w.w:
+			case task := <-w.w: // Received a task
 				res := make(chan result, 1)
 
 				go func() {
@@ -432,12 +433,11 @@ func (w *worker) loop() {
 				}()
 
 				select {
-				case r := <-res:
+				case r := <-res: // Finished task
 					task.result <- r
 					close(task.result)
 
-				case <-w.cTerminate:
-					log.Println("w.cTerminate 1")
+				case <-w.cTerminate: // Received terminate signal
 					task.result <- result{
 						Output: nil,
 						Err:    ErrReqInterrupted,
@@ -447,25 +447,15 @@ func (w *worker) loop() {
 					return
 				}
 
-			case <-w.cStop:
-				// Receive stop signal
-				log.Println("w.cStop 1")
+			case <-w.cStop: // Received stop signal
 				return
-
-			case <-w.cTerminate:
-				// Receive terminate signal
-				log.Println("w.cTerminate 2")
+			case <-w.cTerminate: // Received terminate signal
 				return
 			}
 
-		case <-w.cStop:
-			// Receive stop signal
-			log.Println("w.cStop 2")
+		case <-w.cStop: // Received stop signal
 			return
-
-		case <-w.cTerminate:
-			// Receive terminate signal
-			log.Println("w.cTerminate 3")
+		case <-w.cTerminate: // Received terminate signal
 			return
 		}
 	}
