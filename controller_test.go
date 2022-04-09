@@ -109,6 +109,37 @@ func TestSetWorkers(t *testing.T) {
 	assertEqual(t, c.GetWorkers(), workers)
 }
 
+func TestSetWorkersWhileProcessingTasks(t *testing.T) {
+	c := New(1)
+	req := Request{
+		TaskFunc: func() (any, error) {
+			return taskfn(1, 500, false)
+		},
+	}
+
+	wg := sync.WaitGroup{}
+	for i := 0; i < 30; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := c.AddRequest(req)
+			assertEqual(t, res.(int64), 2)
+			assertEqual(t, err == nil, true)
+		}()
+	}
+
+	time.Sleep(250 * time.Millisecond)
+	c.SetWorkers(10)
+	assertEqual(t, c.GetWorkers(), 10)
+
+	time.Sleep(250 * time.Millisecond)
+	c.SetWorkers(2)
+	assertEqual(t, c.GetWorkers(), 2)
+
+	wg.Wait()
+	c.Stop(true)
+}
+
 func TestIsRunning(t *testing.T) {
 	c := New(1)
 	assertEqual(t, c.IsRunning(), true)
@@ -121,6 +152,24 @@ func TestIsStopped(t *testing.T) {
 	c.Stop(true)
 	assertEqual(t, c.IsRunning(), false)
 	assertEqual(t, c.IsStopped(), true)
+}
+
+func TestIsShuttingDown(t *testing.T) {
+	c := New(1)
+	req := Request{
+		TaskFunc: func() (any, error) {
+			return taskfn(1, 1000, false)
+		},
+	}
+
+	res := c.AddAsyncRequest(req)
+	time.Sleep(250 * time.Millisecond)
+	go c.Stop(false)
+	time.Sleep(250 * time.Millisecond)
+	assertEqual(t, c.IsShuttingDown(), true)
+	r := <-res
+	assertEqual(t, r.Err == nil, true)
+	assertEqual(t, r.Output.(int64), 2)
 }
 
 func TestRestart(t *testing.T) {
@@ -141,6 +190,49 @@ func TestStop(t *testing.T) {
 
 	err = c.Stop(true)
 	assertEqual(t, err == ErrControllerIsNotRunning, true)
+}
+
+func TestStopLongRunningTasks(t *testing.T) {
+	t.Run("stop", func(t *testing.T) {
+		c := New(1)
+
+		req := Request{
+			TaskFunc: func() (any, error) {
+				return taskfn(1, 1000, false)
+			},
+		}
+
+		for i := 0; i < 3; i++ {
+			go func() {
+				res, err := c.AddRequest(req)
+				assertEqual(t, err == nil, true)
+				assertEqual(t, res.(int64), 2)
+			}()
+		}
+		time.Sleep(250 * time.Millisecond)
+		c.Stop(false)
+	})
+
+	t.Run("terminate", func(t *testing.T) {
+		c := New(1)
+
+		req := Request{
+			TaskFunc: func() (any, error) {
+				return taskfn(1, 1000, false)
+			},
+		}
+
+		for i := 0; i < 3; i++ {
+			go func() {
+				res, err := c.AddRequest(req)
+				assertEqual(t, err == ErrReqInterrupted || err == ErrControllerIsNotRunning, true)
+				assertEqual(t, res == nil, true)
+			}()
+		}
+
+		time.Sleep(250 * time.Millisecond)
+		c.Stop(true)
+	})
 }
 
 func TestAddRequest(t *testing.T) {
@@ -261,44 +353,6 @@ func TestAddAsyncRequestTimeout(t *testing.T) {
 	})
 }
 
-func TestStopLongRunningTasks(t *testing.T) {
-	t.Run("stop", func(t *testing.T) {
-		c := New(1)
-
-		req := Request{
-			TaskFunc: func() (any, error) {
-				return taskfn(1, 2000, false)
-			},
-		}
-
-		res := c.AddAsyncRequest(req)
-		time.Sleep(500 * time.Millisecond)
-
-		c.Stop(false)
-		r := <-res
-		assertEqual(t, r.Err == nil, true)
-		assertEqual(t, r.Output.(int64), 2)
-	})
-
-	t.Run("terminate", func(t *testing.T) {
-		c := New(1)
-
-		req := Request{
-			TaskFunc: func() (any, error) {
-				return taskfn(1, 2000, false)
-			},
-		}
-
-		res := c.AddAsyncRequest(req)
-		time.Sleep(500 * time.Millisecond)
-
-		c.Stop(true)
-		r := <-res
-		assertEqual(t, r.Err == ErrReqInterrupted, true)
-		assertEqual(t, r.Output == nil, true)
-	})
-}
-
 func TestQueuedTasks(t *testing.T) {
 	c := New(1)
 
@@ -316,51 +370,9 @@ func TestQueuedTasks(t *testing.T) {
 	c.Stop(true)
 }
 
-func TestIsShuttingDown(t *testing.T) {
+func TestControllerLoop(t *testing.T) {
 	c := New(1)
-	req := Request{
-		TaskFunc: func() (any, error) {
-			return taskfn(1, 2000, false)
-		},
-	}
-
-	res := c.AddAsyncRequest(req)
-	time.Sleep(500 * time.Millisecond)
-	go c.Stop(false)
-	time.Sleep(500 * time.Millisecond)
-	assertEqual(t, c.IsShuttingDown(), true)
-	r := <-res
-	assertEqual(t, r.Err == nil, true)
-	assertEqual(t, r.Output.(int64), 2)
-}
-
-func TestSetWorkersWhileProcessingTasks(t *testing.T) {
-	c := New(1)
-	req := Request{
-		TaskFunc: func() (any, error) {
-			return taskfn(1, 1000, false)
-		},
-	}
-
-	wg := sync.WaitGroup{}
-	for i := 0; i < 30; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			res, err := c.AddRequest(req)
-			assertEqual(t, res.(int64), 2)
-			assertEqual(t, err == nil, true)
-		}()
-	}
-
-	time.Sleep(500 * time.Millisecond)
-	c.SetWorkers(10)
-	assertEqual(t, c.GetWorkers(), 10)
-
-	time.Sleep(500 * time.Millisecond)
-	c.SetWorkers(2)
-	assertEqual(t, c.GetWorkers(), 2)
-
-	wg.Wait()
+	c.loop()
 	c.Stop(true)
+	assertEqual(t, c.IsStopped(), true)
 }
