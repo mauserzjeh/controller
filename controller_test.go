@@ -46,27 +46,20 @@ func assertNotEqual[T comparable](t *testing.T, got, want T) {
 	}
 }
 
-// taskFunc simulates a task that can be given to the controller. It is
+// taskfn simulates a task that can be given to the controller. It is
 // It simply multiplies the given number by 2.
 // Duration parameter sets how long the function takes to process (ms).
 // Fail parameter sets if the result should end up with an error.
-func taskFunc(i, duration int64, fail bool) Result {
+func taskfn(i, duration int64, fail bool) (any, error) {
 	if duration > 0 {
 		time.Sleep(time.Duration(duration) * time.Millisecond)
 	}
 
 	if fail {
-		return Result{
-			Output: nil,
-			Err:    errors.New("taskCallback failed"),
-		}
+		return nil, errors.New("taskfn failed")
 	}
 
-	return Result{
-		Output: i * 2,
-		Err:    nil,
-	}
-
+	return i * 2, nil
 }
 
 // Tests ------------------------------------------------------------
@@ -144,14 +137,14 @@ func TestAddRequest(t *testing.T) {
 	defer c.Stop(true)
 
 	r := Request{
-		TaskFunc: func() Result {
-			return taskFunc(1, 0, false)
+		TaskFunc: func() (any, error) {
+			return taskfn(1, 0, false)
 		},
 	}
 
-	res := c.AddRequest(r)
-	assertEqual(t, res.Err == nil, true)
-	assertEqual(t, res.Output.(int64), 2)
+	res, err := c.AddRequest(r)
+	assertEqual(t, err == nil, true)
+	assertEqual(t, res.(int64), 2)
 }
 
 func TestAddRequestTimeout(t *testing.T) {
@@ -159,13 +152,13 @@ func TestAddRequestTimeout(t *testing.T) {
 	defer c.Stop(true)
 
 	r := Request{
-		TaskFunc: func() Result {
-			return taskFunc(1, 500, false)
+		TaskFunc: func() (any, error) {
+			return taskfn(1, 200, false)
 		},
 		Timeout: 100 * time.Millisecond,
 	}
 
-	res := c.AddRequest(r)
-	assertEqual(t, res.Err == ErrReqTimedOut, true)
-	assertEqual(t, res.Output == nil, true)
+	res, err := c.AddRequest(r)
+	assertEqual(t, err == ErrReqTimedOut, true)
+	assertEqual(t, res == nil, true)
 }

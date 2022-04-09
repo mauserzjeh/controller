@@ -48,12 +48,12 @@ type (
 
 	// Request struct that can be sent to the controller
 	Request struct {
-		TaskFunc func() Result // A function to do
-		Timeout  time.Duration // Optional timeout
+		TaskFunc func() (any, error) // A function to do
+		Timeout  time.Duration       // Optional timeout
 	}
 
-	// Result struct will hold the result of a request
-	Result struct {
+	// result struct will hold the result of a request
+	result struct {
 		Output any   // Output of the task function
 		Err    error // Error of the task function
 	}
@@ -81,8 +81,8 @@ type (
 
 	// task struct represents a task
 	task struct {
-		taskFunc func() Result // A function to do
-		result   chan Result   // Result channel where the result will be sent back
+		taskFunc func() result // A function to do
+		result   chan result   // Result channel where the result will be sent back
 	}
 )
 
@@ -286,15 +286,16 @@ func (c *controller) Restart() error {
 // AddRequest adds a new request to the queue
 // and returns the result when it is processed.
 // The function blocks until the result is returned
-func (c *controller) AddRequest(r Request) Result {
-	return c.addTask(r)
+func (c *controller) AddRequest(r Request) (any, error) {
+	res := c.addTask(r)
+	return res.Output, res.Err
 }
 
 // AddAsyncRequest adds a new request to the queue and returns
 // a channel on which the result can be received.
 // The function does not block.
-func (c *controller) AddAsyncRequest(r Request) chan Result {
-	res := make(chan Result, 1)
+func (c *controller) AddAsyncRequest(r Request) chan result {
+	res := make(chan result, 1)
 
 	go func() {
 		res <- c.addTask(r)
@@ -305,9 +306,9 @@ func (c *controller) AddAsyncRequest(r Request) chan Result {
 }
 
 // addTask adds a new task to the queue and returns the result
-func (c *controller) addTask(r Request) Result {
+func (c *controller) addTask(r Request) result {
 	if !c.IsRunning() {
-		return Result{
+		return result{
 			Output: nil,
 			Err:    ErrControllerIsNotRunning,
 		}
@@ -315,7 +316,7 @@ func (c *controller) addTask(r Request) Result {
 
 	t := task{
 		taskFunc: r.taskFuncTimeoutWrapper(),
-		result:   make(chan Result, 1),
+		result:   make(chan result, 1),
 	}
 
 	select {
@@ -330,7 +331,7 @@ func (c *controller) addTask(r Request) Result {
 		atomic.AddInt32(&c.queuedTasks, 1)
 
 	case <-c.cQuit:
-		return Result{
+		return result{
 			Output: nil,
 			Err:    ErrReqInterrupted,
 		}
@@ -342,7 +343,7 @@ func (c *controller) addTask(r Request) Result {
 		return res
 
 	case <-c.cQuit:
-		return Result{
+		return result{
 			Output: nil,
 			Err:    ErrReqInterrupted,
 		}
@@ -351,23 +352,35 @@ func (c *controller) addTask(r Request) Result {
 }
 
 // taskFuncTimeoutWrapper TODO
-func (r *Request) taskFuncTimeoutWrapper() func() Result {
-	if r.Timeout <= 0 {
-		return r.TaskFunc
+func (r *Request) taskFuncTimeoutWrapper() func() result {
+	f := func() result {
+		output, err := r.TaskFunc()
+		return result{
+			Output: output,
+			Err:    err,
+		}
 	}
 
-	return func() Result {
-		res := make(chan Result, 1)
+	if r.Timeout <= 0 {
+		return f
+	}
+
+	return func() result {
+		res := make(chan result, 1)
 
 		timeout := time.NewTimer(r.Timeout)
 		defer timeout.Stop()
 
+		go func() {
+			res <- f()
+		}()
+
 		select {
-		case res <- r.TaskFunc():
-			return <-res
+		case r := <-res:
+			return r
 
 		case <-timeout.C:
-			return Result{
+			return result{
 				Output: nil,
 				Err:    ErrReqTimedOut,
 			}
@@ -406,16 +419,21 @@ func (w *worker) loop() {
 
 			select {
 			case task := <-w.w:
-				// Worker received a task
+				res := make(chan result, 1)
+
+				go func() {
+					res <- task.taskFunc()
+					close(res)
+				}()
+
 				select {
-				case task.result <- task.taskFunc():
-					// Process the task and send back the result
+				case r := <-res:
+					task.result <- r
 					close(task.result)
 
 				case <-w.cTerminate:
-					// Worker got terminated while the task was still processing
 					log.Println("w.cTerminate 1")
-					task.result <- Result{
+					task.result <- result{
 						Output: nil,
 						Err:    ErrReqInterrupted,
 					}
