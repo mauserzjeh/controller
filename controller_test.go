@@ -46,7 +46,8 @@ func assertNotEqual[T comparable](t *testing.T, got, want T) {
 	}
 }
 
-// taskFunc simulates a task. It simply multiplies the given number by 2.
+// taskFunc simulates a task that can be given to the controller. It is
+// It simply multiplies the given number by 2.
 // Duration parameter sets how long the function takes to process (ms).
 // Fail parameter sets if the result should end up with an error.
 func taskFunc(i, duration int64, fail bool) Result {
@@ -65,13 +66,14 @@ func taskFunc(i, duration int64, fail bool) Result {
 		Output: i * 2,
 		Err:    nil,
 	}
+
 }
 
 // Tests ------------------------------------------------------------
 
 func TestNewController(t *testing.T) {
 	c := New(0)
-	defer c.Terminate()
+	defer c.Stop(true)
 
 	assertNotEqual(t, c, nil)
 }
@@ -79,15 +81,25 @@ func TestNewController(t *testing.T) {
 func TestGetWorkers(t *testing.T) {
 	workers := 5
 	c := New(workers)
-	defer c.Terminate()
+	defer c.Stop(true)
 
 	assertEqual(t, c.GetWorkers(), workers)
+
+	c2 := New(0)
+	defer c2.Stop(true)
+
+	assertEqual(t, c2.GetWorkers(), 1)
+
+	c3 := New(-1)
+	defer c3.Stop(true)
+
+	assertEqual(t, c3.GetWorkers(), 1)
 }
 
 func TestSetWorkers(t *testing.T) {
 	workers := 5
 	c := New(workers)
-	defer c.Terminate()
+	defer c.Stop(true)
 
 	assertEqual(t, c.GetWorkers(), workers)
 
@@ -98,22 +110,62 @@ func TestSetWorkers(t *testing.T) {
 	workers = 3
 	c.SetWorkers(workers)
 	assertEqual(t, c.GetWorkers(), workers)
+
+	c.SetWorkers(workers)
+	assertEqual(t, c.GetWorkers(), workers)
 }
 
 func TestIsRunning(t *testing.T) {
-	workers := 1
-	c := New(workers)
-
+	c := New(1)
 	assertEqual(t, c.IsRunning(), true)
-	c.Terminate()
+	c.Stop(true)
 	assertEqual(t, c.IsRunning(), false)
 }
 
-func TestIsTerminated(t *testing.T) {
-	workers := 1
-	c := New(workers)
-	assertEqual(t, c.IsRunning(), true)
-	c.Terminate()
+func TestIsStopped(t *testing.T) {
+	c := New(1)
+	c.Stop(true)
 	assertEqual(t, c.IsRunning(), false)
-	assertEqual(t, c.IsTerminated(), true)
+	assertEqual(t, c.IsStopped(), true)
+}
+
+func TestRestart(t *testing.T) {
+	c := New(1)
+	c.Stop(true)
+	err := c.Restart()
+	assertEqual(t, err == nil, true)
+
+	err = c.Restart()
+	assertEqual(t, err == ErrControllerMustBeStoppedOrTerminated, true)
+}
+
+func TestAddRequest(t *testing.T) {
+	c := New(1)
+	defer c.Stop(true)
+
+	r := Request{
+		TaskFunc: func() Result {
+			return taskFunc(1, 0, false)
+		},
+	}
+
+	res := c.AddRequest(r)
+	assertEqual(t, res.Err == nil, true)
+	assertEqual(t, res.Output.(int64), 2)
+}
+
+func TestAddRequestTimeout(t *testing.T) {
+	c := New(1)
+	defer c.Stop(true)
+
+	r := Request{
+		TaskFunc: func() Result {
+			return taskFunc(1, 500, false)
+		},
+		Timeout: 100 * time.Millisecond,
+	}
+
+	res := c.AddRequest(r)
+	assertEqual(t, res.Err == ErrReqTimedOut, true)
+	assertEqual(t, res.Output == nil, true)
 }
