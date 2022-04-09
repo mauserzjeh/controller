@@ -120,21 +120,15 @@ func (c *controller) loop() {
 
 		for {
 			select {
-			case t := <-c.queue: // Receive task from the queue
-
-				select {
-				case w := <-c.pool: // Get a worker from the pool
-					w <- t // Give the task to the worker
-
-				case <-c.cTerminate: // Receive terminate signal
-					return
-				}
-
 			case <-c.cTerminate: // Receive terminate signal
 				return
 			case <-c.cStop: // Receive stop signal
 				return
 
+			case t := <-c.queue: // Receive task from the queue
+
+				w := <-c.pool // Get a worker from the pool
+				w <- t        // Give the task to the worker
 			}
 		}
 	}()
@@ -421,42 +415,35 @@ func (w *worker) loop() {
 
 	for {
 		select {
-		case w.pool <- w.w: // Register worker to the pool
-
-			select {
-			case task := <-w.w: // Received a task
-				res := make(chan result, 1)
-
-				go func() {
-					res <- task.taskFunc()
-					close(res)
-				}()
-
-				select {
-				case r := <-res: // Finished task
-					task.result <- r
-					close(task.result)
-
-				case <-w.cTerminate: // Received terminate signal
-					task.result <- result{
-						Output: nil,
-						Err:    ErrReqInterrupted,
-					}
-
-					close(task.result)
-					return
-				}
-
-			case <-w.cStop: // Received stop signal
-				return
-			case <-w.cTerminate: // Received terminate signal
-				return
-			}
-
 		case <-w.cStop: // Received stop signal
 			return
 		case <-w.cTerminate: // Received terminate signal
 			return
+
+		case w.pool <- w.w: // Register worker to the pool
+
+			task := <-w.w // Received a task
+			res := make(chan result, 1)
+
+			go func() {
+				res <- task.taskFunc()
+				close(res)
+			}()
+
+			select {
+			case r := <-res: // Finished task
+				task.result <- r
+				close(task.result)
+
+			case <-w.cTerminate: // Received terminate signal
+				task.result <- result{
+					Output: nil,
+					Err:    ErrReqInterrupted,
+				}
+
+				close(task.result)
+				return
+			}
 		}
 	}
 }
