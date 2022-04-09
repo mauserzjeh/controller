@@ -132,6 +132,16 @@ func TestRestart(t *testing.T) {
 	assertEqual(t, err == ErrControllerMustBeStoppedOrTerminated, true)
 }
 
+func TestDoubleStop(t *testing.T) {
+	c := New(1)
+	err := c.Stop(true)
+	assertEqual(t, err == nil, true)
+	assertEqual(t, c.IsStopped(), true)
+
+	err = c.Stop(true)
+	assertEqual(t, err == ErrControllerIsNotRunning, true)
+}
+
 func TestAddRequest(t *testing.T) {
 	c := New(1)
 	defer c.Stop(true)
@@ -148,17 +158,128 @@ func TestAddRequest(t *testing.T) {
 }
 
 func TestAddRequestTimeout(t *testing.T) {
+
+	t.Run("function_times_out", func(t *testing.T) {
+		c := New(1)
+		defer c.Stop(true)
+
+		r := Request{
+			TaskFunc: func() (any, error) {
+				return taskfn(1, 200, false)
+			},
+			Timeout: 100 * time.Millisecond,
+		}
+
+		res, err := c.AddRequest(r)
+		assertEqual(t, err == ErrReqTimedOut, true)
+		assertEqual(t, res == nil, true)
+	})
+
+	t.Run("function_does_not_timeout", func(t *testing.T) {
+		c := New(1)
+		defer c.Stop(true)
+
+		r := Request{
+			TaskFunc: func() (any, error) {
+				return taskfn(1, 0, false)
+			},
+			Timeout: 100 * time.Millisecond,
+		}
+
+		res, err := c.AddRequest(r)
+		assertEqual(t, err == nil, true)
+		assertEqual(t, res.(int64), 2)
+	})
+}
+
+func TestAddAsyncRequest(t *testing.T) {
 	c := New(1)
 	defer c.Stop(true)
 
-	r := Request{
+	req := Request{
 		TaskFunc: func() (any, error) {
-			return taskfn(1, 200, false)
+			return taskfn(1, 0, false)
 		},
-		Timeout: 100 * time.Millisecond,
 	}
 
-	res, err := c.AddRequest(r)
-	assertEqual(t, err == ErrReqTimedOut, true)
-	assertEqual(t, res == nil, true)
+	res := c.AddAsyncRequest(req)
+	r := <-res
+	assertEqual(t, r.Err == nil, true)
+	assertEqual(t, r.Output.(int64), 2)
+}
+
+func TestAddAsyncRequestTimeout(t *testing.T) {
+
+	t.Run("function_times_out", func(t *testing.T) {
+		c := New(1)
+		defer c.Stop(true)
+
+		req := Request{
+			TaskFunc: func() (any, error) {
+				return taskfn(1, 200, false)
+			},
+			Timeout: 100 * time.Millisecond,
+		}
+
+		res := c.AddAsyncRequest(req)
+		r := <-res
+		assertEqual(t, r.Err == ErrReqTimedOut, true)
+		assertEqual(t, r.Output == nil, true)
+	})
+
+	t.Run("function_does_not_timeout", func(t *testing.T) {
+		c := New(1)
+		defer c.Stop(true)
+
+		req := Request{
+			TaskFunc: func() (any, error) {
+				return taskfn(1, 0, false)
+			},
+			Timeout: 100 * time.Millisecond,
+		}
+
+		res := c.AddAsyncRequest(req)
+		r := <-res
+		assertEqual(t, r.Err == nil, true)
+		assertEqual(t, r.Output.(int64), 2)
+	})
+}
+
+func TestStopLongRunningTasks(t *testing.T) {
+	t.Run("stop", func(t *testing.T) {
+		c := New(1)
+
+		req := Request{
+			TaskFunc: func() (any, error) {
+				return taskfn(1, 2000, false)
+			},
+		}
+
+		res := c.AddAsyncRequest(req)
+		time.Sleep(500 * time.Millisecond)
+
+		c.Stop(false)
+		r := <-res
+		assertEqual(t, r.Err == nil, true)
+		assertEqual(t, r.Output.(int64), 2)
+	})
+
+	t.Run("terminate", func(t *testing.T) {
+		c := New(1)
+
+		req := Request{
+			TaskFunc: func() (any, error) {
+				return taskfn(1, 2000, false)
+			},
+		}
+
+		res := c.AddAsyncRequest(req)
+		time.Sleep(500 * time.Millisecond)
+
+		c.Stop(true)
+		r := <-res
+		// log.Printf("%+v", r)
+		assertEqual(t, r.Err == ErrReqInterrupted, true)
+		assertEqual(t, r.Output == nil, true)
+	})
 }

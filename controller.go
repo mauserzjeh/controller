@@ -65,7 +65,8 @@ type (
 		queuedTasks int32          // Counter for queued tasks
 		workers     []*worker      // Workers that the controller holds
 		state       int32          // State of the controller
-		cQuit       chan struct{}  // Quit signal channel
+		cStop       chan struct{}  // Stop signal channel
+		cTerminate  chan struct{}  // Terminate signal channel
 		cExited     chan struct{}  // Exited signal channel
 		mux         sync.Mutex     // Mutex for locking
 	}
@@ -93,11 +94,12 @@ type (
 // New creates a new controller instance with a set amount of workers
 func New(workers int) *controller {
 	c := controller{
-		pool:    make(chan chan task),
-		queue:   make(chan task),
-		state:   stateStopped,
-		cQuit:   make(chan struct{}),
-		cExited: make(chan struct{}),
+		pool:       make(chan chan task),
+		queue:      make(chan task),
+		state:      stateStopped,
+		cStop:      make(chan struct{}),
+		cTerminate: make(chan struct{}),
+		cExited:    make(chan struct{}),
 	}
 
 	c.SetWorkers(workers) // Initialize workers
@@ -122,23 +124,27 @@ func (c *controller) loop() {
 		for {
 			select {
 			case t := <-c.queue:
-				// Receive a task from the queue
+
 				select {
 				case w := <-c.pool:
-					// Get a worker from the pool and assign the task to the worker
+
 					w <- t
 					atomic.AddInt32(&c.queuedTasks, -1)
 
-				case <-c.cQuit:
-					log.Println("c.Quit 1")
-					// Receive quit signal
+				case <-c.cTerminate:
+					log.Println("c.cTerminate 1")
+
 					return
 				}
 
-			case <-c.cQuit:
-				log.Println("c.Quit 2")
-				// Receive quit signal
+			case <-c.cStop:
+				log.Println("c.cStop 1")
 				return
+
+			case <-c.cTerminate:
+				log.Println("c.cTerminate 2")
+				return
+
 			}
 		}
 	}()
@@ -247,10 +253,14 @@ func (c *controller) Stop(terminate bool) error {
 		return ErrControllerIsNotRunning
 	}
 
-	close(c.cQuit)
-	c.stopWorkers(terminate)
+	if terminate {
+		close(c.cTerminate)
+	} else {
+		close(c.cStop)
+	}
 
 	<-c.cExited
+	c.stopWorkers(terminate)
 
 	if terminate {
 		// Purge the queue
@@ -270,7 +280,8 @@ func (c *controller) Restart() error {
 		return ErrControllerMustBeStoppedOrTerminated
 	}
 
-	c.cQuit = make(chan struct{})
+	c.cStop = make(chan struct{})
+	c.cTerminate = make(chan struct{})
 	c.cExited = make(chan struct{})
 
 	c.mux.Lock()
@@ -306,7 +317,16 @@ func (c *controller) AddAsyncRequest(r Request) chan result {
 }
 
 // addTask adds a new task to the queue and returns the result
-func (c *controller) addTask(r Request) result {
+func (c *controller) addTask(r Request) (res result) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = result{
+				Output: nil,
+				Err:    ErrControllerIsNotRunning,
+			}
+		}
+	}()
+
 	if !c.IsRunning() {
 		return result{
 			Output: nil,
@@ -319,30 +339,15 @@ func (c *controller) addTask(r Request) result {
 		result:   make(chan result, 1),
 	}
 
+	c.queue <- t
+	atomic.AddInt32(&c.queuedTasks, 1)
+
 	select {
-
-	// TODO
-	// If a worker is available then give the task to the worker
-	// case w := <-c.pool:
-	// 	w <- t
-
-	// Otherwise put the task to the queue
-	case c.queue <- t:
-		atomic.AddInt32(&c.queuedTasks, 1)
-
-	case <-c.cQuit:
-		return result{
-			Output: nil,
-			Err:    ErrReqInterrupted,
-		}
-	}
-
-	// Return the result
-	select {
-	case res := <-t.result:
+	case res = <-t.result:
 		return res
 
-	case <-c.cQuit:
+	case <-c.cTerminate:
+		log.Println("addTask.cTerminate")
 		return result{
 			Output: nil,
 			Err:    ErrReqInterrupted,
