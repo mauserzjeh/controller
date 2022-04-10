@@ -89,7 +89,7 @@ func main() {
 
 	// Create a controller
 	c := controller.New(
-		controller.Workers(1000),         // If omitted the minimum default workers is 1
+		controller.Workers(1000),         // If omitted, then the minimum default workers is 1
 		controller.BufferedQueue(100000), // If omitted or 0 is given, then the queue is unbuffered
 	)
 
@@ -176,9 +176,9 @@ resultChannel := c.AddAsyncRequest(req)
 result := <-resultChannel
 
 // result.Output will hold the returned value if there was any
-// result.Err will hold the returned error if there was any. The
+// result.Err will hold the returned error if there was any. 
 
-// Err field will hold the error either returned by the function (if it returns any errors)
+// The Err field will hold the error either returned by the function (if it returns any errors)
 // or the error assigned by the controller (timeout, terminate error, 
 // trying to send request to the controller when it's not running etc...)
 
@@ -198,7 +198,7 @@ err := c.Stop(terminate)
 
 ### Adjust workers at runtime
 ```golang
-// The minimum amount of workers is 1. So if a value less than the default 1 is given, then
+// The minimum amount of workers is 1. So if a value, less than the default 1 is given, then
 // the controller will set its worker amount to 1
 
 c.SetWorkers(100) // Sets the amount of workers to 100
@@ -228,7 +228,7 @@ err := c.Restart()
 ```golang
 // Create new controller
 c := controller.New(
-    controller.Workers(1000), // If omitted the minimum default workers is 1
+    controller.Workers(1000), // If omitted, then the minimum default workers is 1
     controller.BufferedQueue(100000), // If omitted or 0 is given, then the queue is unbuffered
 )
 ```
