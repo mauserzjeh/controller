@@ -64,16 +64,16 @@ type (
 		Timeout  time.Duration       // Optional timeout
 	}
 
-	// result struct will hold the result of a request
-	result struct {
+	// Result struct will hold the result of a request
+	Result struct {
 		Output any   // Output of the task function
 		Err    error // Error of the task function
 	}
 
 	// task struct represents a task
 	task struct {
-		taskFunc func() result // A function to do
-		result   chan result   // Result channel where the result will be sent back
+		taskFunc func() Result // A function to do
+		result   chan Result   // Result channel where the result will be sent back
 	}
 )
 
@@ -283,9 +283,9 @@ func (c *controller) AddRequest(r Request) (any, error) {
 // AddAsyncRequest adds a new request to the queue and returns
 // a channel on which the result can be received.
 // The function does not block.
-func (c *controller) AddAsyncRequest(r Request) chan result {
+func (c *controller) AddAsyncRequest(r Request) chan Result {
 	atomic.AddInt32(&c.queuedTasks, 1)
-	res := make(chan result, 1)
+	res := make(chan Result, 1)
 
 	go func() {
 		res <- c.addTask(r)
@@ -297,12 +297,12 @@ func (c *controller) AddAsyncRequest(r Request) chan result {
 }
 
 // addTask adds a new task to the queue and returns the result
-func (c *controller) addTask(r Request) (res result) {
+func (c *controller) addTask(r Request) (res Result) {
 
 	// Handle if there is panic, due to trying to send on closed channel
 	defer func() {
 		if r := recover(); r != nil {
-			res = result{
+			res = Result{
 				Output: nil,
 				Err:    ErrControllerIsNotRunning,
 			}
@@ -311,7 +311,7 @@ func (c *controller) addTask(r Request) (res result) {
 
 	// Check if the controller is running
 	if !c.IsRunning() {
-		return result{
+		return Result{
 			Output: nil,
 			Err:    ErrControllerIsNotRunning,
 		}
@@ -320,7 +320,7 @@ func (c *controller) addTask(r Request) (res result) {
 	// Create task
 	t := task{
 		taskFunc: r.taskFuncTimeoutWrapper(),
-		result:   make(chan result, 1),
+		result:   make(chan Result, 1),
 	}
 
 	c.queue <- t // Send task to the queue
@@ -330,7 +330,7 @@ func (c *controller) addTask(r Request) (res result) {
 		return res
 
 	case <-c.cTerminate: // Received terminate signal, return error
-		return result{
+		return Result{
 			Output: nil,
 			Err:    ErrReqInterrupted,
 		}
@@ -339,11 +339,11 @@ func (c *controller) addTask(r Request) (res result) {
 }
 
 // taskFuncTimeoutWrapper wraps the function in a timeout function if timeout is set.
-func (r *Request) taskFuncTimeoutWrapper() func() result {
+func (r *Request) taskFuncTimeoutWrapper() func() Result {
 	// Create default function
-	f := func() result {
+	f := func() Result {
 		output, err := r.TaskFunc()
-		return result{
+		return Result{
 			Output: output,
 			Err:    err,
 		}
@@ -355,8 +355,8 @@ func (r *Request) taskFuncTimeoutWrapper() func() result {
 	}
 
 	// Return timeout function
-	return func() result {
-		res := make(chan result, 1)
+	return func() Result {
+		res := make(chan Result, 1)
 
 		timeout := time.NewTimer(r.Timeout)
 		defer timeout.Stop()
@@ -370,7 +370,7 @@ func (r *Request) taskFuncTimeoutWrapper() func() result {
 			return r
 
 		case <-timeout.C:
-			return result{
+			return Result{
 				Output: nil,
 				Err:    ErrReqTimedOut,
 			}
