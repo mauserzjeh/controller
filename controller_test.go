@@ -32,7 +32,7 @@ import (
 // Helpers ----------------------------------------------------------
 
 // assertEqual fails if the two values are not equal
-func assertEqual[T comparable](t *testing.T, got, want T) {
+func assertEqual[T comparable](t testing.TB, got, want T) {
 	t.Helper()
 	if got != want {
 		t.Errorf("got: %v != want: %v", got, want)
@@ -40,7 +40,7 @@ func assertEqual[T comparable](t *testing.T, got, want T) {
 }
 
 // assertNotEqual fails if the two values are equal
-func assertNotEqual[T comparable](t *testing.T, got, want T) {
+func assertNotEqual[T comparable](t testing.TB, got, want T) {
 	t.Helper()
 	if got == want {
 		t.Errorf("didn't want %v", got)
@@ -375,4 +375,48 @@ func TestControllerLoop(t *testing.T) {
 	c.loop()
 	c.Stop(true)
 	assertEqual(t, c.IsStopped(), true)
+}
+
+// Benchmarks -------------------------------------------------------
+
+const (
+	benchmarkWorkers  = 2000
+	benchmarkRequests = 1000000
+)
+
+func BenchmarkRequest(b *testing.B) {
+	c := New(benchmarkWorkers)
+
+	req := Request{
+		TaskFunc: func() (any, error) {
+			return taskfn(1, 0, false)
+		},
+	}
+
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < benchmarkRequests; j++ {
+			_ = c.AddAsyncRequest(req)
+		}
+	}
+
+	c.Stop(false)
+}
+
+func BenchmarkRequestTimeout(b *testing.B) {
+	c := New(benchmarkWorkers)
+
+	req := Request{
+		TaskFunc: func() (any, error) {
+			return taskfn(1, 10, false)
+		},
+		Timeout: 1 * time.Second,
+	}
+
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < benchmarkRequests; j++ {
+			_ = c.AddAsyncRequest(req)
+		}
+	}
+
+	c.Stop(false)
 }
