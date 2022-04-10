@@ -33,6 +33,8 @@ const (
 	stateRunning int32 = iota
 	stateShutDown
 	stateStopped
+
+	minWorkers = 1
 )
 
 var (
@@ -43,6 +45,18 @@ var (
 )
 
 type (
+
+	// controller struct represents the controller
+	controller struct {
+		pool        chan chan task // Pool for workers
+		queue       chan task      // Queue for queued tasks
+		queuedTasks int32          // Counter for queued tasks
+		workers     []*worker      // Workers that the controller holds
+		state       int32          // State of the controller
+		cTerminate  chan struct{}  // Terminate signal channel
+		cExited     chan struct{}  // Exited signal channel
+		mux         sync.Mutex     // Mutex for locking
+	}
 
 	// Request struct that can be sent to the controller
 	Request struct {
@@ -56,28 +70,6 @@ type (
 		Err    error // Error of the task function
 	}
 
-	// controller struct represents the controller
-	controller struct {
-		pool        chan chan task // Pool for workers
-		queue       chan task      // Queue for queued tasks
-		queuedTasks int32          // Counter for queued tasks
-		workers     []*worker      // Workers that the controller holds
-		state       int32          // State of the controller
-		cStop       chan struct{}  // Stop signal channel
-		cTerminate  chan struct{}  // Terminate signal channel
-		cExited     chan struct{}  // Exited signal channel
-		mux         sync.Mutex     // Mutex for locking
-	}
-
-	// worker struct represents a single worker
-	worker struct {
-		pool       chan<- chan task // Pool where the worker registers itself
-		w          chan task        // The request channel of the worker where it will receive a task after registration
-		cStop      chan struct{}    // Stop signal channel
-		cTerminate chan struct{}    // Terminate signal channel
-		cExited    chan struct{}    // Exited signal channel
-	}
-
 	// task struct represents a task
 	task struct {
 		taskFunc func() result // A function to do
@@ -85,23 +77,20 @@ type (
 	}
 )
 
-// ------------------------------------------------------------------
-// Controller
-// ------------------------------------------------------------------
-
 // New creates a new controller instance with a set amount of workers
-func New(workers int) *controller {
+func New(opts ...option) *controller {
+	o := setOptions(opts...)
+
 	c := controller{
 		pool:       make(chan chan task),
-		queue:      make(chan task),
+		queue:      make(chan task, o.queueSize),
 		state:      stateStopped,
-		cStop:      make(chan struct{}),
 		cTerminate: make(chan struct{}),
 		cExited:    make(chan struct{}),
 	}
 
-	c.SetWorkers(workers) // Initialize workers
-	c.loop()              // Start controller loop
+	c.SetWorkers(o.workers) // Initialize workers
+	c.loop()                // Start controller loop
 	return &c
 }
 
@@ -122,13 +111,15 @@ func (c *controller) loop() {
 			select {
 			case <-c.cTerminate: // Receive terminate signal
 				return
-			case <-c.cStop: // Receive stop signal
-				return
 
-			case t := <-c.queue: // Receive task from the queue
-
-				w := <-c.pool // Get a worker from the pool
-				w <- t        // Give the task to the worker
+			case t, ok := <-c.queue: // Receive task from the queue
+				if ok {
+					w := <-c.pool // Get a worker from the pool
+					w <- t        // Give the task to the worker
+				} else {
+					// Queue was closed and no more tasks can be received
+					return
+				}
 			}
 		}
 	}()
@@ -156,7 +147,7 @@ func (c *controller) SetWorkers(workers int) {
 
 	// There must be at least 1 worker in the pool
 	if workers <= 0 {
-		workers = 1
+		workers = minWorkers
 	}
 
 	// Don't do anything if the size  wasn't changed
@@ -243,18 +234,17 @@ func (c *controller) Stop(terminate bool) error {
 		return ErrControllerIsNotRunning
 	}
 
+	close(c.queue)
+
 	if terminate {
 		close(c.cTerminate)
-		close(c.queue)
-		c.queue = make(chan task)
 		atomic.StoreInt32(&c.queuedTasks, 0)
-	} else {
-		close(c.cStop)
 	}
 
 	<-c.cExited
 	c.stopWorkers(terminate)
 
+	c.queue = make(chan task)
 	atomic.StoreInt32(&c.state, stateStopped)
 	return nil
 }
@@ -267,7 +257,6 @@ func (c *controller) Restart() error {
 		return ErrControllerMustBeStopped
 	}
 
-	c.cStop = make(chan struct{})
 	c.cTerminate = make(chan struct{})
 	c.cExited = make(chan struct{})
 
@@ -387,78 +376,4 @@ func (r *Request) taskFuncTimeoutWrapper() func() result {
 			}
 		}
 	}
-}
-
-// ------------------------------------------------------------------
-// Worker
-// ------------------------------------------------------------------
-
-// newWorker creates a new worker instance
-func newWorker(pool chan<- chan task) *worker {
-	w := worker{
-		pool:       pool,
-		w:          make(chan task, 1),
-		cStop:      make(chan struct{}),
-		cTerminate: make(chan struct{}),
-		cExited:    make(chan struct{}),
-	}
-
-	go w.loop() // Start worker loop
-	return &w
-}
-
-// loop runs a worker loop
-func (w *worker) loop() {
-	defer func() {
-		close(w.cExited)
-	}()
-
-	for {
-		select {
-		case <-w.cStop: // Received stop signal
-			return
-		case <-w.cTerminate: // Received terminate signal
-			return
-
-		case w.pool <- w.w: // Register worker to the pool
-
-			task := <-w.w // Received a task
-			res := make(chan result, 1)
-
-			go func() {
-				res <- task.taskFunc()
-				close(res)
-			}()
-
-			select {
-			case r := <-res: // Finished task
-				task.result <- r
-				close(task.result)
-
-			case <-w.cTerminate: // Received terminate signal
-				task.result <- result{
-					Output: nil,
-					Err:    ErrReqInterrupted,
-				}
-
-				close(task.result)
-				return
-			}
-		}
-	}
-}
-
-// stop closes the stop channel signaling the worker to stop
-func (w *worker) stop() {
-	close(w.cStop)
-}
-
-// terminate closes the terminate channel signaling the worker to terminate
-func (w *worker) terminate() {
-	close(w.cTerminate)
-}
-
-// exited blocks until the worker has exited from its loop
-func (w *worker) exited() {
-	<-w.cExited
 }

@@ -66,7 +66,7 @@ func taskfn(i, duration int64, fail bool) (any, error) {
 // Tests ------------------------------------------------------------
 
 func TestNewController(t *testing.T) {
-	c := New(0)
+	c := New()
 	defer c.Stop(true)
 
 	assertNotEqual(t, c, nil)
@@ -74,17 +74,17 @@ func TestNewController(t *testing.T) {
 
 func TestGetWorkers(t *testing.T) {
 	workers := 5
-	c := New(workers)
+	c := New(Workers(workers))
 	defer c.Stop(true)
 
 	assertEqual(t, c.GetWorkers(), workers)
 
-	c2 := New(0)
+	c2 := New()
 	defer c2.Stop(true)
 
 	assertEqual(t, c2.GetWorkers(), 1)
 
-	c3 := New(-1)
+	c3 := New(Workers(-1))
 	defer c3.Stop(true)
 
 	assertEqual(t, c3.GetWorkers(), 1)
@@ -92,7 +92,7 @@ func TestGetWorkers(t *testing.T) {
 
 func TestSetWorkers(t *testing.T) {
 	workers := 5
-	c := New(workers)
+	c := New(Workers(workers))
 	defer c.Stop(true)
 
 	assertEqual(t, c.GetWorkers(), workers)
@@ -110,7 +110,7 @@ func TestSetWorkers(t *testing.T) {
 }
 
 func TestSetWorkersWhileProcessingTasks(t *testing.T) {
-	c := New(1)
+	c := New()
 	req := Request{
 		TaskFunc: func() (any, error) {
 			return taskfn(1, 500, false)
@@ -141,21 +141,21 @@ func TestSetWorkersWhileProcessingTasks(t *testing.T) {
 }
 
 func TestIsRunning(t *testing.T) {
-	c := New(1)
+	c := New()
 	assertEqual(t, c.IsRunning(), true)
 	c.Stop(true)
 	assertEqual(t, c.IsRunning(), false)
 }
 
 func TestIsStopped(t *testing.T) {
-	c := New(1)
+	c := New()
 	c.Stop(true)
 	assertEqual(t, c.IsRunning(), false)
 	assertEqual(t, c.IsStopped(), true)
 }
 
 func TestIsShuttingDown(t *testing.T) {
-	c := New(1)
+	c := New()
 	req := Request{
 		TaskFunc: func() (any, error) {
 			return taskfn(1, 1000, false)
@@ -173,7 +173,7 @@ func TestIsShuttingDown(t *testing.T) {
 }
 
 func TestRestart(t *testing.T) {
-	c := New(1)
+	c := New()
 	c.Stop(true)
 	err := c.Restart()
 	assertEqual(t, err == nil, true)
@@ -183,7 +183,7 @@ func TestRestart(t *testing.T) {
 }
 
 func TestStop(t *testing.T) {
-	c := New(1)
+	c := New()
 	err := c.Stop(true)
 	assertEqual(t, err == nil, true)
 	assertEqual(t, c.IsStopped(), true)
@@ -194,7 +194,7 @@ func TestStop(t *testing.T) {
 
 func TestStopLongRunningTasks(t *testing.T) {
 	t.Run("stop", func(t *testing.T) {
-		c := New(1)
+		c := New(BufferedQueue(10))
 
 		req := Request{
 			TaskFunc: func() (any, error) {
@@ -203,18 +203,19 @@ func TestStopLongRunningTasks(t *testing.T) {
 		}
 
 		for i := 0; i < 3; i++ {
-			go func() {
+			go func(i int) {
 				res, err := c.AddRequest(req)
 				assertEqual(t, err == nil, true)
 				assertEqual(t, res.(int64), 2)
-			}()
+			}(i)
 		}
+
 		time.Sleep(250 * time.Millisecond)
 		c.Stop(false)
 	})
 
 	t.Run("terminate", func(t *testing.T) {
-		c := New(1)
+		c := New()
 
 		req := Request{
 			TaskFunc: func() (any, error) {
@@ -229,14 +230,12 @@ func TestStopLongRunningTasks(t *testing.T) {
 				assertEqual(t, res == nil, true)
 			}()
 		}
-
-		time.Sleep(250 * time.Millisecond)
 		c.Stop(true)
 	})
 }
 
 func TestAddRequest(t *testing.T) {
-	c := New(1)
+	c := New()
 	defer c.Stop(true)
 
 	r := Request{
@@ -251,7 +250,7 @@ func TestAddRequest(t *testing.T) {
 }
 
 func TestAddRequestStopped(t *testing.T) {
-	c := New(1)
+	c := New()
 	c.Stop(true)
 
 	r := Request{
@@ -268,7 +267,7 @@ func TestAddRequestStopped(t *testing.T) {
 func TestAddRequestTimeout(t *testing.T) {
 
 	t.Run("function_times_out", func(t *testing.T) {
-		c := New(1)
+		c := New()
 		defer c.Stop(true)
 
 		r := Request{
@@ -284,7 +283,7 @@ func TestAddRequestTimeout(t *testing.T) {
 	})
 
 	t.Run("function_does_not_timeout", func(t *testing.T) {
-		c := New(1)
+		c := New()
 		defer c.Stop(true)
 
 		r := Request{
@@ -301,7 +300,7 @@ func TestAddRequestTimeout(t *testing.T) {
 }
 
 func TestAddAsyncRequest(t *testing.T) {
-	c := New(1)
+	c := New()
 	defer c.Stop(true)
 
 	req := Request{
@@ -319,7 +318,7 @@ func TestAddAsyncRequest(t *testing.T) {
 func TestAddAsyncRequestTimeout(t *testing.T) {
 
 	t.Run("function_times_out", func(t *testing.T) {
-		c := New(1)
+		c := New()
 		defer c.Stop(true)
 
 		req := Request{
@@ -336,7 +335,7 @@ func TestAddAsyncRequestTimeout(t *testing.T) {
 	})
 
 	t.Run("function_does_not_timeout", func(t *testing.T) {
-		c := New(1)
+		c := New()
 		defer c.Stop(true)
 
 		req := Request{
@@ -354,7 +353,7 @@ func TestAddAsyncRequestTimeout(t *testing.T) {
 }
 
 func TestQueuedTasks(t *testing.T) {
-	c := New(1)
+	c := New()
 
 	req := Request{
 		TaskFunc: func() (any, error) {
@@ -365,13 +364,12 @@ func TestQueuedTasks(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		c.AddAsyncRequest(req)
 	}
-
 	assertNotEqual(t, c.QueuedTasks(), 0)
 	c.Stop(true)
 }
 
 func TestControllerLoop(t *testing.T) {
-	c := New(1)
+	c := New()
 	c.loop()
 	c.Stop(true)
 	assertEqual(t, c.IsStopped(), true)
@@ -380,12 +378,31 @@ func TestControllerLoop(t *testing.T) {
 // Benchmarks -------------------------------------------------------
 
 const (
-	benchmarkWorkers  = 2000
-	benchmarkRequests = 1000000
+	benchmarkWorkers     = 2000
+	benchmarkRequests    = 1000000
+	benchmarkQueueBuffer = 100000
 )
 
 func BenchmarkRequest(b *testing.B) {
-	c := New(benchmarkWorkers)
+	c := New(Workers(benchmarkWorkers))
+
+	req := Request{
+		TaskFunc: func() (any, error) {
+			return taskfn(1, 0, false)
+		},
+	}
+
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < benchmarkRequests; j++ {
+			_ = c.AddAsyncRequest(req)
+		}
+	}
+
+	c.Stop(false)
+}
+
+func BenchmarkRequestBuffered(b *testing.B) {
+	c := New(Workers(benchmarkWorkers), BufferedQueue(benchmarkQueueBuffer))
 
 	req := Request{
 		TaskFunc: func() (any, error) {
@@ -403,7 +420,26 @@ func BenchmarkRequest(b *testing.B) {
 }
 
 func BenchmarkRequestTimeout(b *testing.B) {
-	c := New(benchmarkWorkers)
+	c := New(Workers(benchmarkWorkers))
+
+	req := Request{
+		TaskFunc: func() (any, error) {
+			return taskfn(1, 10, false)
+		},
+		Timeout: 1 * time.Second,
+	}
+
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < benchmarkRequests; j++ {
+			_ = c.AddAsyncRequest(req)
+		}
+	}
+
+	c.Stop(false)
+}
+
+func BenchmarkRequestTimeoutBuffered(b *testing.B) {
+	c := New(Workers(benchmarkWorkers), BufferedQueue(benchmarkQueueBuffer))
 
 	req := Request{
 		TaskFunc: func() (any, error) {
