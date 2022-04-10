@@ -199,7 +199,7 @@ err := c.Stop(terminate)
 ### Adjust workers at runtime
 ```golang
 // The minimum amount of workers is 1. So if a value, less than the default 1 is given, then
-// the controller will set its worker amount to 1
+// the controller will set its worker amount to 1. The method is thread safe.
 
 c.SetWorkers(100) // Sets the amount of workers to 100
 
