@@ -2,7 +2,7 @@
 
 Controller is a worker pool implementation in Go. It can take requests and execute them concurrently with a limited amount of workers.
 
-# Features
+## Features
 - Zero dependencies
 - Create a controller with fixed amount of workers
 - Use unbuffered / buffered queue for requests
@@ -18,7 +18,7 @@ Controller is a worker pool implementation in Go. It can take requests and execu
 - Get the state of the controller
 - Get the amount of tasks queued
 
-# Motivation
+## Motivation
 The main motivation of this library was to simply practice Go and get more familiar with goroutines and concurrency. This implementation is probably not the most performant one compared to other famous worker pool libraries, but feel free to run benchmarks.
 
 Here are some of the resources that served as an inspiration:
@@ -30,15 +30,15 @@ Here are some of the resources that served as an inspiration:
 - https://github.com/alitto/pond
 - https://github.com/Jeffail/tunny
 
-# Installation
+## Installation
 ```
 go get -u github.com/mauserzjeh/controller
 ```
-# Tests
+## Tests
 ```
 go test -v
 ```
-# Benchmarks
+## Benchmarks
 Benchmarks use 2K workers and 1M requets with a buffered queue of 100K
 ```
 go test -bench=. -benchmem=true -run=none
