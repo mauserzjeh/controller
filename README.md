@@ -1,3 +1,7 @@
+![GitHub release (latest by date)](https://img.shields.io/github/v/release/mauserzjeh/controller?style=flat-square)
+
+
+
 # Controller
 
 Controller is a worker pool implementation in Go. It can take requests and execute them concurrently with a limited amount of workers.
